@@ -102,7 +102,16 @@ $update = set_skytap $testpth $json_network 'PUT'
 foreach($v in $vm_ids){
    $vm = get_skytap "vms/$($v)"
    $env = get_skytap "$($vm.configuration_url)"
-   
+      #have the vm details and environment details.
+   #add a similar vm from skytap public library
+   #remove 'bad' vm.
+   #update similar vm profile to match that of the removed vm.  
+   <#
+   name, hardware,  interfaces, notes, labels, credentials
+   #>
+    # boot
+    # attach asset
+    # send restart?
 }
 
 
