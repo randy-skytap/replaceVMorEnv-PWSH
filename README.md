@@ -1,2 +1,2 @@
 # replaceVMorEnv-PWSH
-Testing out as a DR the replacement of a single VM in an environment or the environment itself and rebuild based on original VMS
+Disaster recovery the replacement of a single VM in an environment, rebuild based on original VM settings, and mount ISO.
