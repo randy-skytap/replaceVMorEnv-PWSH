@@ -1,32 +1,23 @@
 <#
-Get environment
-pick a vm
+DECLARE
+  -VM to replace.
+  -Template VM for recovery
+  -ISO to mount.
 
-#single vm
-list attributes.
--nics
--networks connected.
--disks
--ram
--cpu
--name
--etc
+REBUILD targeted VM and rebuild certain attributes.
+  -Name, Network Card(s), Disk(s), RAM, CPU
 
-Challenges
-- adding disks beyond standard sizing won't execute.  
-- The DR template should have disks set to the max size needed
-
+START new VM to MOUNT ISO then RESTART
 #>
 
-
 # Script variables
-$vm_ids = @('122949245') # <----- Provide new ID everytime
-$templates_recovery = '2603797' # template has no nic, network, or disk.  holds guest os value.
-$asset_id = '650461'  # <-------- Asset ID will vary based on region.
+$vm_ids = @('<VM ID 1>','<VM ID 2>') # <----- Provide new ID everytime
+$template_recovery_id = '<Template ID>' # template has no nic, network, or disk.  holds guest os value.
+$asset_id = '<Asset ID>'  # <-------- Asset ID will vary based on region.
 
 # Skytap connection information
 $content = 'application/json'
-$cred_sky = Get-Credential -UserName '<skytap user>' -Message "Provide Skytap API Token"
+$cred_sky = Get-Credential -UserName '<Skytap User>' -Message "Provide Skytap API Token"
 $baseAuth_sky = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(("{0}:{1}" -f $cred_sky.UserName, $cred_sky.GetNetworkCredential().Password)))
 $header_sky =  @{Authorization=("Basic {0}" -f $baseAuth_sky); "Content_type" = $content; "accept" = $content}
 $uri = 'https://cloud.skytap.com/'
@@ -41,17 +32,18 @@ Function get_skytap ($r) {
     return, $result
 }
 
-#check for runstate
+# Check for runstate
 Function busyness ($b){
+    Write-Output "Checking for busy resource:  $($b)"
     $i = 0
 	$check = get_skytap $b
 	while($i -ne 3 -and $check.busy -ne $null){
-		write-output 'inside while'
+		write-output "Busy Resource:  $($check.id) $($check.name)"
 		$i++
 		$check = get_skytap $b
 		sleep -Seconds 10
 	}
-	return, $check
+	#return, $check
 }
 
 # Simplifies setting things like environment runstate, adding vm, etc.
@@ -66,31 +58,36 @@ Function set_skytap ($pth, $jsn, $method) {
 ###########################################     FUNCTIONS   ########################################
 ###########################################      ACTIONS    ########################################
 # Connect to Skytap
-Invoke-RestMethod -uri $uri -Headers $header_sky -Method GET -sessionvariable session 
+$connect_skytap = Invoke-RestMethod -uri $uri -Headers $header_sky -Method GET -sessionvariable session 
+
+$recover_template = get_skytap "templates/$($template_recovery_id)"
 
 ####### starting to look at just a particular vm id(s)
 foreach($v in $vm_ids){
-    #vm detail   
+    # VM information   
+    write-host 'Get VM information'
     $vm = get_skytap "vms/$($v)"
-    #environment detail
-    $environment = get_skytap "$($vm.configuration_url)"
-    $recover_template = get_skytap "templates/$($templates_recovery)"
 
-    # Use DR template VM for that region.  removed NIC for merging simplicity.
-    $add_vm = set_skytap "$($vm.configuration_url).json" @{template_id = $templates_recovery} 'PUT'
+    # Use DR template VM for that region.  Removed NIC for merging simplicity.
+    write-host 'Add recovery VM '
+    $add_vm = set_skytap "$($vm.configuration_url).json" @{template_id = $template_recovery_id} 'PUT'
     
-    # Delete VM
-    $destroy_vm = set_skytap "vms/$($vm.id)" '' 'DELETE'
+    # Delete VM.  This $vm has the detail to use going forward.
+    write-host 'Delete source VM'
+    $delete_vm = set_skytap "vms/$($vm.id)" '' 'DELETE'
 
     # Update new vm
+    write-host 'Update new VM'
     $new_vm = $add_vm.vms | ? {$_.name -like $recover_template.vms[0].name}
     
-    #add disk1 then rest 
-    $disk1 = $vm.hardware.disks | ? {$_.controller -like '0' -and $_.lun -like '0'}
+    # Add disk1 then others
+    write-host 'Organize Disk information'
+    $disk1 = $vm.hardware.disks | ? {$_.controller -like '0' -and $_.lun -like '0'}  
     $disks = @($disk1.size)
     foreach($d in ($vm.hardware.disks |? {$_.id -ne $disk1.id})){$disks += $d.size}
 
-    # update hardware
+    # Update hardware
+    write-host 'Update Hardware settings'
     $json_hardware = @{
         name= $vm.name;
         hardware=@{
@@ -102,20 +99,24 @@ foreach($v in $vm_ids){
             cpus_per_socket = $vm.hardware.cpus_per_socket
         }
     } 
-    $update_hardware = set_skytap "vms/$($new_vm.id)" $json_ram 'PUT'
+    $update_hardware = set_skytap "vms/$($new_vm.id)" $json_hardware 'PUT'
 
 
     # Create network cards and add to corresponding network.
     foreach($nic in $vm.interfaces){
-        busyness $vm.configuration_url
-        $add_nic = set_skytap "$($vm.configuration_url)/vms/$($new_vm.id)/interfaces.json" @{nic_type= $nic.nic_type} 'POST'
-        
-        busyness $vm.configuration_url
+        write-host "Add NIC ($($nic.hostname))"
         sleep -Seconds 20
+        busyness "$($vm.configuration_url)/vms/$($new_vm.id).json"
+        $add_nic = set_skytap "$($vm.configuration_url)/vms/$($new_vm.id)/interfaces.json" @{nic_type= $nic.nic_type} 'POST'
+
+        write-host "Sleep then connect nic ($($nic.hostname)) to network $($nic.network_id)"
+        sleep -Seconds 20
+        busyness "$($vm.configuration_url)/vms/$($new_vm.id).json"
         $connect_network = set_skytap "$($vm.configuration_url)/vms/$($new_vm.id)/interfaces/$($add_nic.id).json" @{network_id= $nic.network_id} 'PUT'
         
-        busyness $vm.configuration_url
+        write-host "Sleep then update nic ($($nic.id)) ip $($nic.ip); host $($nic.hostname); mac $($nic.mac)"
         sleep -Seconds 20
+        busyness "$($vm.configuration_url)/vms/$($new_vm.id).json"
         $json_update_nic = @{
             ip= $nic.ip;
             hostname= $nic.hostname;
@@ -124,16 +125,19 @@ foreach($v in $vm_ids){
         $update_nic = set_skytap "$($vm.configuration_url)/vms/$($new_vm.id)/interfaces/$($add_nic.id).json" $json_update_nic 'PUT'
     }
   
-    # boot
+    # Boot
+    write-host "Start New VM"
     $start_vm = set_skytap "vms/$($new_vm.id).json" @{runstate="running"} 'PUT'
-    sleep -Seconds 45
-    # attach asset
+    sleep -Seconds 60
+
+    # Mount ISO (asset)
     busyness $vm.configuration_url
+    write-host "Mount ISO"
     $mount_iso = set_skytap "vms/$($new_vm.id)" @{asset_id= $asset_id} 'PUT'
-    # send restart?
+    
+    # Restart
     busyness $vm.configuration_url
+    write-host "Restart New VM"
     $restart_vm = set_skytap "vms/$($new_vm.id).json" @{runstate="reset"} 'PUT'
 
 }
-
-
